@@ -1,234 +1,899 @@
 import os
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-import re
+import json
 import joblib
-import numpy as np
 import pandas as pd
+
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from sklearn.neighbors import KNeighborsClassifier
+from sklearn.preprocessing import OneHotEncoder
 from sklearn.linear_model import LogisticRegression
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.ensemble import RandomForestClassifier
-from imblearn.pipeline import Pipeline as ImbPipeline
-from imblearn.over_sampling import SMOTE
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+)
+
 from xgboost import XGBClassifier
+from imblearn.over_sampling import SMOTE
 
-def main():
-    print("=== Training & Exporting Models from Notebook Pipeline ===", flush=True)
-    
-    csv_path = r"C:\Users\nadia\Downloads\aug_train.csv"
-    if not os.path.exists(csv_path):
-        csv_path = "aug_train.csv"
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"Cannot find aug_train.csv at {csv_path}")
 
-    print(f"Loading data from {csv_path}...")
-    df = pd.read_csv(csv_path)
-    print("Data shape:", df.shape)
+# ============================================================
+# CONFIG
+# ============================================================
 
-    # Step 3: Handle Missing Values exactly as notebook
-    df_clean = df.copy()
-    mode_columns = ["enrolled_university", "education_level", "experience", "last_new_job"]
-    mode_values = {}
-    for col in mode_columns:
-        m = df_clean[col].mode()[0]
-        mode_values[col] = m
-        df_clean[col] = df_clean[col].fillna(m)
+EXPORT_DIR = "model"
+DATA_PATH = "aug_train.csv"
 
-    unknown_columns = ["gender", "major_discipline", "company_size", "company_type"]
-    for col in unknown_columns:
-        df_clean[col] = df_clean[col].fillna("Unknown")
+os.makedirs(EXPORT_DIR, exist_ok=True)
 
-    # Step 4: Define X / y and Split into Train/Test
-    X = df_clean.drop(columns=["target", "enrollee_id"])
-    y = df_clean["target"]
-    
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
+print("=" * 70)
+print("JOB CHANGE - 7 MODEL EXPORT")
+print("=" * 70)
 
-    categorical_columns = X.select_dtypes(include=["object"]).columns.tolist()
-    numerical_columns = X.select_dtypes(exclude=["object"]).columns.tolist()
 
-    # Step 6: Encode Categorical Columns
-    encoder = OneHotEncoder(handle_unknown="ignore", drop="first", sparse_output=False)
-    encoder.fit(X_train[categorical_columns])
+# ============================================================
+# LOAD DATA
+# ============================================================
 
-    X_train_cat = pd.DataFrame(
-        encoder.transform(X_train[categorical_columns]),
-        index=X_train.index,
-        columns=encoder.get_feature_names_out(categorical_columns)
-    )
-    X_train_encoded = pd.concat([X_train_cat, X_train[numerical_columns]], axis=1)
-    X_train_encoded.columns = X_train_encoded.columns.astype(str)
+df = pd.read_csv(DATA_PATH)
+df_clean = df.copy()
 
-    # Step 8: Feature Engineering
-    experience_num_train = X_train["experience"].replace({"<1": 0, ">20": 21, "Unknown": 0}).astype(float)
-    X_train_fe_num = X_train[numerical_columns].copy()
-    X_train_fe_num["experience_to_training_ratio"] = experience_num_train / (X_train["training_hours"] + 1)
-    X_train_fe_num["has_relevant_degree"] = (X_train["major_discipline"] == "STEM").astype(int)
+print(f"Dataset shape: {df_clean.shape}")
 
-    # Step 9: Build Feature-Engineered Matrix (181 columns)
-    X_train_encoded_fe = pd.concat([X_train_cat, X_train_fe_num], axis=1)
-    X_train_encoded_fe.columns = X_train_encoded_fe.columns.astype(str)
 
-    # Output directory
-    output_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "model"))
-    os.makedirs(output_dir, exist_ok=True)
+# ============================================================
+# CLEANING
+# ============================================================
 
-    print("\n1. Training Model 1: KNN Pipeline (StandardScaler + SMOTE + KNN)...", flush=True)
-    best_knn = ImbPipeline([
-        ("scaler", StandardScaler()),
-        ("smote", SMOTE(random_state=42)),
-        ("knn", KNeighborsClassifier(n_neighbors=33, weights="distance", p=1, n_jobs=1)),
-    ])
-    best_knn.fit(X_train_encoded, y_train)
-    knn_threshold = 0.581
-    joblib.dump(best_knn, os.path.join(output_dir, "knn.pkl"))
-    print("-> Saved knn.pkl", flush=True)
+mode_columns = [
+    "enrolled_university",
+    "education_level",
+    "experience",
+    "last_new_job",
+]
 
-    print("\n2. Training Model 2: Logistic Regression + SMOTE (Feature Engineered)...", flush=True)
-    smote = SMOTE(random_state=42)
-    X_train_fe_bal, y_train_fe_bal = smote.fit_resample(X_train_encoded_fe, y_train)
-    model_fe_bal = LogisticRegression(max_iter=3000, random_state=42)
-    model_fe_bal.fit(X_train_fe_bal, y_train_fe_bal)
-    joblib.dump(model_fe_bal, os.path.join(output_dir, "logistic_regression.pkl"))
-    print("-> Saved logistic_regression.pkl", flush=True)
+for col in mode_columns:
+    df_clean[col] = df_clean[col].fillna(df_clean[col].mode()[0])
 
-    print("\n3. Training Model 3: Tuned Random Forest...", flush=True)
-    best_rf = RandomForestClassifier(
-        n_estimators=400,
-        min_samples_split=10,
-        min_samples_leaf=4,
-        max_features=0.5,
-        max_depth=12,
-        class_weight="balanced_subsample",
-        random_state=42,
-        n_jobs=1
-    )
-    best_rf.fit(X_train_encoded_fe, y_train)
-    joblib.dump(best_rf, os.path.join(output_dir, "random_forest.pkl"))
-    print("-> Saved random_forest.pkl", flush=True)
 
-    print("\n4. Training Model 4: Tuned XGBoost (Approach B + SMOTE)...", flush=True)
-    def sanitize_columns(cols):
-        clean = []
-        for c in cols:
-            c = str(c).replace("<", "lt").replace(">", "gt")
-            c = re.sub(r"[\[\]{}():,]", "_", c)
-            clean.append(c)
-        return clean
+unknown_columns = [
+    "gender",
+    "major_discipline",
+    "company_size",
+    "company_type",
+]
 
-    X_train_xgb = X_train_encoded.copy()
-    X_train_xgb.columns = sanitize_columns(X_train_xgb.columns)
+for col in unknown_columns:
+    df_clean[col] = df_clean[col].fillna("Unknown")
 
-    best_params_smote = {
-        'subsample': 0.7,
-        'reg_lambda': 2,
-        'reg_alpha': 0,
-        'n_estimators': 150,
-        'min_child_weight': 1,
-        'max_depth': 5,
-        'learning_rate': 0.08,
-        'gamma': 0,
-        'colsample_bytree': 0.6
+
+# ============================================================
+# X / y
+# ============================================================
+
+X = df_clean.drop(columns=["target", "enrollee_id"])
+y = df_clean["target"]
+
+
+# ============================================================
+# TRAIN / TEST SPLIT
+# ============================================================
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X,
+    y,
+    test_size=0.2,
+    random_state=42,
+    stratify=y,
+)
+
+
+# ============================================================
+# COLUMN TYPES
+# ============================================================
+
+categorical_columns = X.select_dtypes(
+    include=["object"]
+).columns.tolist()
+
+numerical_columns = X.select_dtypes(
+    exclude=["object"]
+).columns.tolist()
+
+
+# ============================================================
+# ENCODER
+# ============================================================
+
+encoder = OneHotEncoder(
+    handle_unknown="ignore",
+    drop="first",
+    sparse_output=False,
+)
+
+encoder.fit(X_train[categorical_columns])
+
+
+# ============================================================
+# BASIC ENCODING
+# ============================================================
+
+X_train_cat = pd.DataFrame(
+    encoder.transform(X_train[categorical_columns]),
+    index=X_train.index,
+    columns=encoder.get_feature_names_out(categorical_columns),
+)
+
+X_test_cat = pd.DataFrame(
+    encoder.transform(X_test[categorical_columns]),
+    index=X_test.index,
+    columns=encoder.get_feature_names_out(categorical_columns),
+)
+
+
+X_train_encoded = pd.concat(
+    [
+        X_train_cat,
+        X_train[numerical_columns],
+    ],
+    axis=1,
+)
+
+X_test_encoded = pd.concat(
+    [
+        X_test_cat,
+        X_test[numerical_columns],
+    ],
+    axis=1,
+)
+
+X_train_encoded.columns = X_train_encoded.columns.astype(str)
+X_test_encoded.columns = X_test_encoded.columns.astype(str)
+
+
+# ============================================================
+# FEATURE ENGINEERING
+# ============================================================
+
+def create_features(df_in):
+
+    df_fe = df_in.copy()
+
+    exp_mapping = {
+        "<1": 0,
+        ">20": 21,
+        "1": 1,
+        "2": 2,
+        "3": 3,
+        "4": 4,
+        "5": 5,
+        "6": 6,
+        "7": 7,
+        "8": 8,
+        "9": 9,
+        "10": 10,
+        "11": 11,
+        "12": 12,
+        "13": 13,
+        "14": 14,
+        "15": 15,
+        "16": 16,
+        "17": 17,
+        "18": 18,
+        "19": 19,
+        "20": 20,
     }
-    X_tr_b, X_val_b, y_tr_b, y_val_b = train_test_split(
-        X_train_xgb, y_train, test_size=0.15, random_state=42, stratify=y_train
+
+    num_exp = (
+        df_fe["experience"]
+        .map(exp_mapping)
+        .fillna(0)
     )
-    X_tr_b_bal, y_tr_b_bal = SMOTE(random_state=42).fit_resample(X_tr_b, y_tr_b)
-    
-    xgb_model_smote = XGBClassifier(
-        objective="binary:logistic",
-        eval_metric="auc",
-        tree_method="hist",
-        random_state=42,
-        n_jobs=1,
-        early_stopping_rounds=30,
-        **best_params_smote,
+
+    df_fe["experience_to_training_ratio"] = (
+        num_exp / (df_fe["training_hours"] + 1e-5)
     )
-    xgb_model_smote.fit(X_tr_b_bal, y_tr_b_bal, eval_set=[(X_val_b, y_val_b)], verbose=False)
-    joblib.dump(xgb_model_smote, os.path.join(output_dir, "xgboost.pkl"))
-    print("-> Saved xgboost.pkl")
 
-    # Save encoder
-    joblib.dump(encoder, os.path.join(output_dir, "encoder.pkl"))
-    print("-> Saved encoder.pkl")
+    # IMPORTANT:
+    # This matches the notebook definition.
+    df_fe["has_relevant_degree"] = (
+        df_fe["major_discipline"] == "STEM"
+    ).astype(int)
 
-    # Collect UI unique categories for selectboxes
-    categorical_options = {}
-    for col in categorical_columns:
-        # unique values from clean training data, sorted
-        unique_vals = sorted([str(x) for x in X[col].dropna().unique()])
-        if "Unknown" not in unique_vals and col in unknown_columns:
-            unique_vals.append("Unknown")
-        categorical_options[col] = unique_vals
+    return df_fe[
+        [
+            "experience_to_training_ratio",
+            "has_relevant_degree",
+        ]
+    ]
 
-    # Preprocessor Metadata
-    meta = {
-        "mode_values": mode_values,
-        "categorical_columns": categorical_columns,
-        "numerical_columns": numerical_columns,
-        "categorical_options": categorical_options,
-        "encoded_179_columns": X_train_encoded.columns.tolist(),
-        "encoded_181_columns": X_train_encoded_fe.columns.tolist(),
-        "xgb_columns": X_train_xgb.columns.tolist(),
-        "knn_threshold": knn_threshold,
+
+X_train_fe_extra = create_features(X_train)
+X_test_fe_extra = create_features(X_test)
+
+
+X_train_encoded_fe = pd.concat(
+    [
+        X_train_encoded,
+        X_train_fe_extra,
+    ],
+    axis=1,
+)
+
+X_test_encoded_fe = pd.concat(
+    [
+        X_test_encoded,
+        X_test_fe_extra,
+    ],
+    axis=1,
+)
+
+X_train_encoded_fe.columns = X_train_encoded_fe.columns.astype(str)
+X_test_encoded_fe.columns = X_test_encoded_fe.columns.astype(str)
+
+
+# ============================================================
+# ALIGN TEST FEATURES EXACTLY WITH TRAIN FEATURES
+# ============================================================
+
+X_test_encoded = X_test_encoded[
+    X_train_encoded.columns
+]
+
+X_test_encoded_fe = X_test_encoded_fe[
+    X_train_encoded_fe.columns
+]
+
+
+# ============================================================
+# SMOTE
+# ============================================================
+
+smote = SMOTE(random_state=42)
+
+X_train_bal, y_train_bal = smote.fit_resample(
+    X_train_encoded,
+    y_train,
+)
+
+
+smote_fe = SMOTE(random_state=42)
+
+X_train_bal_fe, y_train_bal_fe = smote_fe.fit_resample(
+    X_train_encoded_fe,
+    y_train,
+)
+
+
+# ============================================================
+# 1. KNN
+# ============================================================
+
+print("\nTraining KNN...")
+
+knn = KNeighborsClassifier(
+    n_neighbors=5
+)
+
+knn.fit(
+    X_train_encoded,
+    y_train,
+)
+
+joblib.dump(
+    knn,
+    os.path.join(EXPORT_DIR, "knn.pkl"),
+)
+
+
+# ============================================================
+# 2. LOGISTIC REGRESSION + SMOTE
+# ============================================================
+
+print("Training LR + SMOTE...")
+
+lr_smote = LogisticRegression(
+    max_iter=3000,
+    random_state=42,
+)
+
+lr_smote.fit(
+    X_train_bal,
+    y_train_bal,
+)
+
+joblib.dump(
+    lr_smote,
+    os.path.join(
+        EXPORT_DIR,
+        "logistic_regression_smote.pkl",
+    ),
+)
+
+
+# ============================================================
+# 3. FE LR + SMOTE
+# ============================================================
+
+print("Training FE LR + SMOTE...")
+
+fe_lr_smote = LogisticRegression(
+    max_iter=3000,
+    random_state=42,
+)
+
+fe_lr_smote.fit(
+    X_train_bal_fe,
+    y_train_bal_fe,
+)
+
+joblib.dump(
+    fe_lr_smote,
+    os.path.join(
+        EXPORT_DIR,
+        "fe_logistic_regression_smote.pkl",
+    ),
+)
+
+
+# ============================================================
+# 4. BASELINE RANDOM FOREST
+# ============================================================
+
+print("Training Baseline Random Forest...")
+
+baseline_rf = RandomForestClassifier(
+    random_state=42,
+)
+
+baseline_rf.fit(
+    X_train_encoded_fe,
+    y_train,
+)
+
+joblib.dump(
+    baseline_rf,
+    os.path.join(
+        EXPORT_DIR,
+        "random_forest.pkl",
+    ),
+)
+
+
+# ============================================================
+# 5. TUNED RANDOM FOREST
+# ============================================================
+
+print("Training Tuned Random Forest...")
+
+tuned_rf = RandomForestClassifier(
+    n_estimators=200,
+    max_depth=15,
+    min_samples_split=5,
+    min_samples_leaf=2,
+    random_state=42,
+)
+
+tuned_rf.fit(
+    X_train_encoded_fe,
+    y_train,
+)
+
+joblib.dump(
+    tuned_rf,
+    os.path.join(
+        EXPORT_DIR,
+        "tuned_random_forest.pkl",
+    ),
+)
+
+
+# ============================================================
+# 6. XGBOOST + scale_pos_weight
+# ============================================================
+
+print("Training XGBoost + scale_pos_weight...")
+
+negative = (y_train == 0).sum()
+positive = (y_train == 1).sum()
+
+scale_pos = negative / positive
+
+xgb_spw = XGBClassifier(
+    scale_pos_weight=scale_pos,
+    random_state=42,
+    eval_metric="logloss",
+)
+
+xgb_spw.fit(
+    X_train_encoded,
+    y_train,
+)
+
+joblib.dump(
+    xgb_spw,
+    os.path.join(
+        EXPORT_DIR,
+        "xgboost_scale_pos_weight.pkl",
+    ),
+)
+
+
+# ============================================================
+# 7. XGBOOST + SMOTE
+# ============================================================
+
+print("Training XGBoost + SMOTE...")
+
+xgb_smote = XGBClassifier(
+    random_state=42,
+    eval_metric="logloss",
+)
+
+xgb_smote.fit(
+    X_train_bal,
+    y_train_bal,
+)
+
+joblib.dump(
+    xgb_smote,
+    os.path.join(
+        EXPORT_DIR,
+        "xgboost_smote.pkl",
+    ),
+)
+
+
+# ============================================================
+# MODELS
+# ============================================================
+
+models = {
+    "KNN": (
+        knn,
+        X_test_encoded,
+    ),
+    "LR + SMOTE": (
+        lr_smote,
+        X_test_encoded,
+    ),
+    "FE LR + SMOTE": (
+        fe_lr_smote,
+        X_test_encoded_fe,
+    ),
+    "Baseline Random Forest": (
+        baseline_rf,
+        X_test_encoded_fe,
+    ),
+    "Tuned Random Forest": (
+        tuned_rf,
+        X_test_encoded_fe,
+    ),
+    "XGBoost + scale_pos_weight": (
+        xgb_spw,
+        X_test_encoded,
+    ),
+    "XGBoost + SMOTE": (
+        xgb_smote,
+        X_test_encoded,
+    ),
+}
+
+
+# ============================================================
+# METRICS
+# ============================================================
+
+metrics = {}
+
+print("\n" + "=" * 70)
+print("MODEL METRICS")
+print("=" * 70)
+
+for name, (model, X_eval) in models.items():
+
+    predictions = model.predict(X_eval)
+    probabilities = model.predict_proba(X_eval)[:, 1]
+
+    result = {
+        "accuracy": float(
+            accuracy_score(y_test, predictions)
+        ),
+        "precision": float(
+            precision_score(
+                y_test,
+                predictions,
+                zero_division=0,
+            )
+        ),
+        "recall": float(
+            recall_score(
+                y_test,
+                predictions,
+                zero_division=0,
+            )
+        ),
+        "f1": float(
+            f1_score(
+                y_test,
+                predictions,
+                zero_division=0,
+            )
+        ),
+        "roc_auc": float(
+            roc_auc_score(
+                y_test,
+                probabilities,
+            )
+        ),
     }
-    joblib.dump(meta, os.path.join(output_dir, "preprocessor_meta.pkl"))
-    print("-> Saved preprocessor_meta.pkl")
 
-    # Feature importances for RF
-    rf_feature_importance = pd.DataFrame({
-        "Feature": X_train_encoded_fe.columns,
-        "Importance": best_rf.feature_importances_
-    }).sort_values(by="Importance", ascending=False)
+    metrics[name] = result
 
-    # Notebook Benchmarks (Cell 112)
-    notebook_benchmarks = {
+    print(f"\n{name}")
+    print(f"Accuracy : {result['accuracy']:.6f}")
+    print(f"Precision: {result['precision']:.6f}")
+    print(f"Recall   : {result['recall']:.6f}")
+    print(f"F1       : {result['f1']:.6f}")
+    print(f"ROC-AUC  : {result['roc_auc']:.6f}")
+
+
+# ============================================================
+# BEST MODEL
+# ============================================================
+
+best_model_name = max(
+    metrics,
+    key=lambda name: metrics[name]["accuracy"],
+)
+
+# Primary model is intentionally Baseline RF
+primary_model_name = "Baseline Random Forest"
+
+
+# ============================================================
+# METRICS EXPORT
+# ============================================================
+
+metrics_payload = {
+    "primary_model": primary_model_name,
+    "best_model_by_accuracy": best_model_name,
+    "models": metrics,
+}
+
+with open(
+    os.path.join(EXPORT_DIR, "metrics.json"),
+    "w",
+) as f:
+
+    json.dump(
+        metrics_payload,
+        f,
+        indent=2,
+    )
+
+
+# ============================================================
+# METADATA
+# ============================================================
+
+metadata = {
+    "primary_model": primary_model_name,
+
+    "categorical_columns": categorical_columns,
+
+    "numerical_columns": numerical_columns,
+
+    "feature_order_original": [
+        str(x)
+        for x in X_train_encoded.columns
+    ],
+
+    "feature_order_fe": [
+        str(x)
+        for x in X_train_encoded_fe.columns
+    ],
+
+    "models": {
         "KNN": {
-            "Accuracy": 0.762787,
-            "Precision": 0.517451,
-            "Recall": 0.714136,
-            "F1-score": 0.600088,
-            "Threshold": 0.581,
-            "Balancing": "SMOTE inside pipeline",
+            "file": "knn.pkl",
+            "feature_type": "original",
         },
-        "Logistic Regression + SMOTE": {
-            "Accuracy": 0.780271,
-            "Precision": 0.542196,
-            "Recall": 0.760209,
-            "F1-score": 0.632956,
-            "Threshold": 0.500,
-            "Balancing": "SMOTE on training data",
+
+        "LR + SMOTE": {
+            "file": "logistic_regression_smote.pkl",
+            "feature_type": "original",
         },
-        "Random Forest": {
-            "Accuracy": 0.797756,
-            "Precision": 0.571770,
-            "Recall": 0.750785,
-            "F1-score": 0.649163,
-            "Threshold": 0.500,
-            "Balancing": "Balanced Subsampling",
+
+        "FE LR + SMOTE": {
+            "file": "fe_logistic_regression_smote.pkl",
+            "feature_type": "feature_engineered",
         },
-        "XGBoost": {
-            "Accuracy": 0.788622,
-            "Precision": 0.558704,
-            "Recall": 0.722513,
-            "F1-score": 0.630137,
-            "Threshold": 0.500,
-            "Balancing": "SMOTE + Early Stopping",
-        }
+
+        "Baseline Random Forest": {
+            "file": "random_forest.pkl",
+            "feature_type": "feature_engineered",
+        },
+
+        "Tuned Random Forest": {
+            "file": "tuned_random_forest.pkl",
+            "feature_type": "feature_engineered",
+        },
+
+        "XGBoost + scale_pos_weight": {
+            "file": "xgboost_scale_pos_weight.pkl",
+            "feature_type": "original",
+        },
+
+        "XGBoost + SMOTE": {
+            "file": "xgboost_smote.pkl",
+            "feature_type": "original",
+        },
+    },
+
+    "feature_engineering": {
+        "experience_to_training_ratio": (
+            "numeric_experience / (training_hours + 1e-5)"
+        ),
+        "has_relevant_degree": (
+            "major_discipline == STEM"
+        ),
+    },
+
+    "threshold": 0.5,
+}
+
+with open(
+    os.path.join(EXPORT_DIR, "metadata.json"),
+    "w",
+) as f:
+
+    json.dump(
+        metadata,
+        f,
+        indent=2,
+    )
+
+
+# ============================================================
+# INSIGHTS
+# ============================================================
+
+total_candidates = len(df_clean)
+
+looking_for_change = int(
+    df_clean["target"].sum()
+)
+
+not_looking_for_change = (
+    total_candidates - looking_for_change
+)
+
+
+def grouped_rates(column):
+
+    result = (
+        df_clean
+        .groupby(column)["target"]
+        .mean()
+        .sort_values(
+            ascending=False
+        )
+    )
+
+    return {
+        str(k): float(v)
+        for k, v in result.items()
     }
 
-    metrics_pack = {
-        "benchmarks": notebook_benchmarks,
-        "rf_feature_importance": rf_feature_importance.head(15).to_dict(orient="records"),
-    }
-    joblib.dump(metrics_pack, os.path.join(output_dir, "notebook_metrics.pkl"))
-    print("-> Saved notebook_metrics.pkl")
-    print("\nAll training and serialization completed successfully!")
 
-if __name__ == "__main__":
-    main()
+factors = [
+    "education_level",
+    "experience",
+    "company_size",
+    "company_type",
+    "last_new_job",
+]
+
+factor_rates = {}
+
+for col in factors:
+
+    grouped = (
+        df_clean
+        .groupby(col)["target"]
+        .mean()
+    )
+
+    factor_rates[col] = float(
+        grouped.max()
+    )
+
+
+# ============================================================
+# TOP 10 RANKING
+# ============================================================
+
+X_all = df_clean.drop(
+    columns=["target", "enrollee_id"]
+).copy()
+
+
+X_all_cat = pd.DataFrame(
+    encoder.transform(
+        X_all[categorical_columns]
+    ),
+    index=X_all.index,
+    columns=encoder.get_feature_names_out(
+        categorical_columns
+    ),
+)
+
+
+X_all_encoded = pd.concat(
+    [
+        X_all_cat,
+        X_all[numerical_columns],
+    ],
+    axis=1,
+)
+
+X_all_encoded.columns = (
+    X_all_encoded.columns.astype(str)
+)
+
+
+X_all_fe_extra = create_features(
+    X_all
+)
+
+
+X_all_encoded_fe = pd.concat(
+    [
+        X_all_encoded,
+        X_all_fe_extra,
+    ],
+    axis=1,
+)
+
+X_all_encoded_fe.columns = (
+    X_all_encoded_fe.columns.astype(str)
+)
+
+X_all_encoded_fe = (
+    X_all_encoded_fe[
+        X_train_encoded_fe.columns
+    ]
+)
+
+
+probabilities = baseline_rf.predict_proba(
+    X_all_encoded_fe
+)[:, 1]
+
+
+candidate_ranking = pd.DataFrame(
+    {
+        "enrollee_id": df_clean[
+            "enrollee_id"
+        ].values,
+
+        "Job_Change_Probability": (
+            probabilities * 100
+        ).round(2),
+    }
+)
+
+
+candidate_ranking = (
+    candidate_ranking
+    .sort_values(
+        by="Job_Change_Probability",
+        ascending=False,
+    )
+    .reset_index(drop=True)
+)
+
+
+candidate_ranking.insert(
+    0,
+    "Rank",
+    range(
+        1,
+        len(candidate_ranking) + 1,
+    ),
+)
+
+
+top_10 = candidate_ranking.head(10)
+
+
+# ============================================================
+# INSIGHTS EXPORT
+# ============================================================
+
+insights = {
+    "dataset": {
+        "total_candidates": total_candidates,
+        "looking_for_change": looking_for_change,
+        "not_looking_for_change": not_looking_for_change,
+        "job_change_rate": float(
+            looking_for_change / total_candidates
+        ),
+    },
+
+    "factor_rates": factor_rates,
+
+    "education_trends": grouped_rates(
+        "education_level"
+    ),
+
+    "experience_trends": grouped_rates(
+        "experience"
+    ),
+
+    "company_size_trends": grouped_rates(
+        "company_size"
+    ),
+
+    "company_type_trends": grouped_rates(
+        "company_type"
+    ),
+
+    "last_new_job_trends": grouped_rates(
+        "last_new_job"
+    ),
+
+    "top_10_candidates": top_10.to_dict(
+        orient="records"
+    ),
+}
+
+
+with open(
+    os.path.join(EXPORT_DIR, "insights.json"),
+    "w",
+) as f:
+
+    json.dump(
+        insights,
+        f,
+        indent=2,
+    )
+
+
+# ============================================================
+# PREPROCESSOR EXPORT
+# ============================================================
+
+preprocessor = {
+    "encoder": encoder,
+    "categorical_columns": categorical_columns,
+    "numerical_columns": numerical_columns,
+}
+
+joblib.dump(
+    preprocessor,
+    os.path.join(
+        EXPORT_DIR,
+        "preprocessor_meta.pkl",
+    ),
+)
+
+
+print("\n" + "=" * 70)
+print("EXPORT COMPLETE")
+print("=" * 70)
+
+print("\nExported models:")
+for filename in os.listdir(EXPORT_DIR):
+    print(" -", filename)
+
+print("\nPrimary model:")
+print(primary_model_name)
+
+print("\nBest model by accuracy:")
+print(best_model_name)
